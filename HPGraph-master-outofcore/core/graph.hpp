@@ -53,8 +53,10 @@ void f_none_2(std::pair<VertexId,VertexId> source_vid_range, std::pair<VertexId,
 class Graph {
 	int parallelism;
 	int edge_unit;
+	int record_col;
 	bool * should_access_shard;
 	bool * should_access_shard_col;
+	bool ** should_access_shard_rc;
 	long ** fsize;
 	//char ** buffer_pool;
 	char ** buffer_pool1;
@@ -116,7 +118,7 @@ public:
 		this->path = path;
 
 		FILE * fin_meta = fopen((path+"/meta").c_str(), "r");
-		fscanf(fin_meta, "%d %d %ld %d", &edge_type, &vertices, &edges, &partitions);
+		fscanf(fin_meta, "%d %d %ld %d %d", &edge_type, &vertices, &edges, &partitions, &record_col);
 		fclose(fin_meta);
 
 		if (edge_type==0) {
@@ -127,6 +129,9 @@ public:
 
 		should_access_shard = new bool[partitions];
 		should_access_shard_col = new bool[partitions];
+		should_access_shard_rc =new bool* [partitions];
+		for(int i=0;i<partitions;i++)
+			should_access_shard_rc[i]=new bool [partitions];
 
 		if (edge_type==0) {
 			edge_unit = sizeof(VertexId) * 2;
@@ -156,16 +161,16 @@ public:
 		assert(bytes==sizeof(long)*(partitions*partitions+1));
 		close(fin_column_offset);
 */
-		column_offset1 = new long [partitions*partitions/2+1];
+		column_offset1 = new long [partitions*record_col+1];
 		int fin_column_offset1 = open((path+"/column_offset-1").c_str(), O_RDONLY);
-		bytes = read(fin_column_offset1, column_offset1, sizeof(long)*(partitions*partitions/2+1));
-		assert(bytes==sizeof(long)*(partitions*partitions/2+1));
+		bytes = read(fin_column_offset1, column_offset1, sizeof(long)*(partitions*record_col+1));
+		assert(bytes==sizeof(long)*(partitions*record_col+1));
 		close(fin_column_offset1);
 		
-		column_offset2 = new long [partitions*partitions/2+1];
+		column_offset2 = new long [partitions*(partitions-record_col)+1];
 		int fin_column_offset2 = open((path+"/column_offset-2").c_str(), O_RDONLY);
-		bytes = read(fin_column_offset2, column_offset2, sizeof(long)*(partitions*partitions/2+1));
-		assert(bytes==sizeof(long)*(partitions*partitions/2+1));
+		bytes = read(fin_column_offset2, column_offset2, sizeof(long)*(partitions*(partitions-record_col)+1));
+		assert(bytes==sizeof(long)*(partitions*(partitions-record_col)+1));
 		close(fin_column_offset2);
 		
 		row_offset = new long [partitions*partitions+1];
@@ -289,11 +294,17 @@ public:
 				for (int i=0;i<partitions;i++) {
 					should_access_shard[i] = true;
 					should_access_shard_col[i] = true;
+					
+					for(int j=0;j<partitions;j++)
+						should_access_shard_rc[i][j]=true;
 				}
 			} else {
 				for (int i=0;i<partitions;i++) {
 					should_access_shard[i] = false;
 					should_access_shard_col[i] = true;
+					
+					for(int j=0;j<partitions;j++)
+						should_access_shard_rc[i][j]=false;
 				}
 				#pragma omp parallel for schedule(dynamic) num_threads(parallelism)
 				for (int partition_id=0;partition_id<partitions;partition_id++) {
@@ -304,6 +315,10 @@ public:
 						unsigned long word = bitmap->data[WORD_OFFSET(i)];
 						if (word!=0) {
 							should_access_shard[partition_id] = true;
+							
+							for(int k=0;k<partitions;k++)
+								should_access_shard_rc[partition_id][k]=true;
+							
 							break;
 						}
 						i = (WORD_OFFSET(i) + 1) << 6;
@@ -322,6 +337,9 @@ public:
 				for (int i=0;i<partitions;i++) {
 					should_access_shard[i] = true;
 					should_access_shard_col[i] = true;
+					
+					for(int j=0;j<partitions;j++)
+						should_access_shard_rc[i][j]=true;
 				}
 			} else {
 				
@@ -350,6 +368,9 @@ public:
 				for (int i=0;i<partitions;i++) {
 					should_access_shard[i] = false;
 					should_access_shard_col[i] = false;
+					
+					for(int j=0;j<partitions;j++)
+						should_access_shard_rc[i][j]=false;
 				}
 				#pragma omp parallel for schedule(dynamic) num_threads(parallelism)
 				for (int partition_id=0;partition_id<partitions;partition_id++) {
@@ -387,25 +408,51 @@ public:
 							//unsigned long count=read(r,r_buffer,sizeof(unsigned long)*(end_vid-begin_vid));
 							//printf("end_vid-begin_vid: %d\n",end_vid-begin_vid);
 							//if(count!=)
-							
+							//printf("begin_vid: %d  end_vid: %d\n",begin_vid,end_vid);
+						
 							unsigned long i=begin_vid;
 							while(i<end_vid){
 								if(bitmap->get_bit(i)!=0&&(*((unsigned long*)(f_map+i))&mask)!=0){
 									should_access_shard_col[partition_id]=true;
+									
+									should_access_shard_rc[p_id][partition_id]=true;
 									break;
 								}
 								i++;
 							}
 						}
 
-						if(should_access_shard_col[partition_id]) break;
+						//if(should_access_shard_col[partition_id]) break;
 					}
+					
+					
 				}
 
 				#pragma omp barrier	
 				
 				//printf("omp2 finish!\n");
 				
+				//printf("GridGraph: %d  HPGraph: %d\n",my_count1*partitions,my_count2);
+				
+				int my_count1=0;
+				int my_count2=0;
+				long g_size=0;
+				long h_size=0;
+				for(int i=0;i<partitions;i++){
+					if(should_access_shard[i]){
+						my_count1++;
+						for(int j=0;j<partitions;j++){
+							g_size=g_size+fsize[i][j];
+							if(should_access_shard_rc[i][j]){
+								my_count2++;
+								h_size=h_size+fsize[i][j];
+							}
+						}
+					}
+				}
+					
+				printf("GridGraph: %d  %ld  HPGraph: %d  %ld\n",my_count1*partitions,g_size,my_count2,h_size);
+				fflush(stdout);
 				int ret=munmap(f_map,vertices*sizeof(unsigned long));
 				assert(ret==0);
 				//numa_free(r_buffer,256*1024*1024);
@@ -424,7 +471,8 @@ public:
 		Queue<std::tuple<int, long, long> > tasks1(65536);
 		std::vector<std::thread> threads;
 		long read_bytes = 0;
-
+		
+		
 		long total_bytes = 0;
 		for (int i=0;i<partitions;i++) {
 			if (!should_access_shard[i]) continue;
@@ -432,6 +480,8 @@ public:
 				total_bytes += fsize[i][j];
 			}
 		}
+		
+/*		
 		int read_mode;
 		if (memory_bytes < total_bytes) {
 			read_mode = O_RDONLY | O_DIRECT;
@@ -440,7 +490,36 @@ public:
 			read_mode = O_RDONLY;
 			// printf("use buffered I/O\n");
 		}
+		
+		long total_bytes1=0;
+		long total_bytes2=0;
+		for(int i=0;i<partitions;i++){
+			if(!should_access_shard[i]) continue;
+			for(int j=0;j<record_col;j++){
+				total_bytes1=total_bytes1+fsize[i][j];
+			}
+			
+			for(int j=record_col;j<partitions;j++){
+				total_bytes2=total_bytes2+fsize[i][j];
+			}
+		}
+		int read_mode1;
+		int read_mode2;
+		if(memory_bytes/2<total_bytes1)
+			read_mode1=O_RDONLY|O_DIRECT;
+		else
+			read_mode1=O_RDONLY;
+		
+		if(memory_bytes/2<total_bytes2)
+			read_mode2=O_RDONLY|O_DIRECT;
+		else
+			read_mode2=O_RDONLY;
+		
+		read_mode1=read_mode2=O_RDONLY;
+*/
 
+		int read_mode=O_RDONLY;
+		
 		int fin;
 		long offset = 0;
 		int fin1,fin2;
@@ -629,13 +708,16 @@ public:
 					}, ti);
 				}
 				offset = 0;
-				for (int j=0;j<partitions/2;j++) {
+				for (int j=0;j<record_col;j++) {
 					
-					if(!should_access_shard_col[j]) continue;
+					//if(!should_access_shard_col[j]) continue;
 					
 					for (int i=cur_partition;i<cur_partition+partition_batch;i++) {
 						if (i>=partitions) break;
-						if (!should_access_shard[i]) continue;
+						//if (!should_access_shard[i]) continue;
+						
+						if(!should_access_shard_rc[i][j]) continue;
+						
 						long begin_offset = column_offset1[j*partitions+i];
 						if (begin_offset - offset >= PAGESIZE) {
 							offset = begin_offset / PAGESIZE * PAGESIZE;
@@ -654,13 +736,16 @@ public:
 				}
 				
 				offset = 0;
-				for (int j=0;j<partitions/2;j++) {
+				for (int j=0;j<partitions-record_col;j++) {
 					
-					if(!should_access_shard_col[j+partitions/2]) continue;
+					//if(!should_access_shard_col[j+partitions/2]) continue;
 					
 					for (int i=cur_partition;i<cur_partition+partition_batch;i++) {
 						if (i>=partitions) break;
-						if (!should_access_shard[i]) continue;
+						//if (!should_access_shard[i]) continue;
+						
+						if(!should_access_shard_rc[i][j+record_col]) continue;
+						
 						long begin_offset = column_offset2[j*partitions+i];
 						if (begin_offset - offset >= PAGESIZE) {
 							offset = begin_offset / PAGESIZE * PAGESIZE;

@@ -13,6 +13,7 @@ Copyright (c) 2014-2015 Xiaowei Zhu, Tsinghua University
    See the License for the specific language governing permissions and
    limitations under the License.
 */
+#define _FILE_OFFSET_BITS 64
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,7 +107,8 @@ void generate_edge_grid(std::string input, std::string output, VertexId vertices
 		}
 	}
 
-	unsigned long* vertex_l=(unsigned long*)malloc(vertices*sizeof(unsigned long));
+	unsigned long* vertex_l=(unsigned long*)malloc((unsigned long)vertices*sizeof(unsigned long));
+	//printf("malloc size: %ld  %ld\n",(unsigned long)vertices*sizeof(unsigned long),sizeof(unsigned long)*vertices);
 	for(unsigned int i=0;i<vertices;i++)
 		vertex_l[i]=0;
 
@@ -229,11 +231,25 @@ void generate_edge_grid(std::string input, std::string output, VertexId vertices
 
 	printf("it takes %.2f seconds to generate edge blocks\n", get_time() - start_time);
 
+	int record_col=0;
+	long f_size=0;
+	for(int i=0;i<partitions;i++){
+		for(int j=0;j<partitions;j++){
+			char filename[4096];
+			sprintf(filename,"%s/block-%d-%d",output.c_str(),j,i);
+			f_size=f_size+file_size(filename);
+		}
+		if(f_size>(file_size(input)/2)){
+			record_col=i+1;
+			break;
+		}
+	}
+	
 	long offset1;
 	int fout_column1 = open((output+"/column-1").c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
 	int fout_column_offset1 = open((output+"/column_offset-1").c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
 	offset1 = 0;
-	for (int j=0;j<partitions/2;j++) {
+	for (int j=0;j<record_col;j++) {
 		for (int i=0;i<partitions;i++) {
 			printf("progress: %.2f%%\r", 100. * offset1 / total_bytes);
 			fflush(stdout);
@@ -259,7 +275,7 @@ void generate_edge_grid(std::string input, std::string output, VertexId vertices
 	int fout_column2 = open((output+"/column-2").c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
 	int fout_column_offset2 = open((output+"/column_offset-2").c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
 	offset2 = 0;
-	for (int j=partitions/2;j<partitions;j++) {
+	for (int j=record_col;j<partitions;j++) {
 		for (int i=0;i<partitions;i++) {
 			printf("progress: %.2f%%\r", 100. * (offset2+offset1) / total_bytes);
 			fflush(stdout);
@@ -311,7 +327,7 @@ void generate_edge_grid(std::string input, std::string output, VertexId vertices
 	printf("it takes %.2f seconds to generate edge grid\n", get_time() - start_time);
 
 	FILE * fmeta = fopen((output+"/meta").c_str(), "w");
-	fprintf(fmeta, "%d %d %ld %d", edge_type, vertices, edges, partitions);
+	fprintf(fmeta, "%d %d %ld %d %d", edge_type, vertices, edges, partitions, record_col);
 	fclose(fmeta);
 /*
 	int arr[25];
@@ -344,7 +360,28 @@ void generate_edge_grid(std::string input, std::string output, VertexId vertices
 
 	int f_w=open((output+"/record_c").c_str(),O_WRONLY|O_APPEND|O_CREAT,0644);
 
-	write(f_w,vertex_l,sizeof(unsigned long)*vertices);
+	if(8*(unsigned long)vertices/1024/1024/1024>=2){
+		long len=(unsigned long)vertices*sizeof(unsigned long);
+		long fix=8*1024*1024*120;
+		int off=0;
+		long bs=0;
+		while(len>0){
+			if(len>fix)
+				bs=write(f_w,vertex_l+off,fix);
+			else
+				bs=write(f_w,vertex_l+off,len);
+			
+			len=len-bs;
+			off=off+bs/8;
+		}
+		//write(f_w,vertex_l,sizeof(unsigned long)*1024*1024*120);
+		//write(f_w,vertex_l+1024*1024*120,sizeof(unsigned long)*(unsigned long)(vertices-1024*1024*120));
+	}
+	else{
+		write(f_w,vertex_l,sizeof(unsigned long)*(unsigned long)vertices);
+	}
+	//long bytes=write(f_w,vertex_l,sizeof(unsigned long)*(unsigned long)vertices);
+	//printf("bytes: %ld\n",bytes);
 
 	close(f_w);
 

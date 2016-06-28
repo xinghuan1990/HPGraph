@@ -42,6 +42,7 @@ int main(int argc, char ** argv) {
 	while (active_vertices!=0) {
 		iteration++;
 		printf("%7d: %d\n", iteration, active_vertices);
+		fflush(stdout);
 		std::swap(active_in, active_out);
 		active_out->clear();
 		graph.hint(label);
